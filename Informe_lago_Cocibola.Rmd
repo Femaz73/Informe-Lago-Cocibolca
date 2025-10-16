@@ -1,0 +1,188 @@
+---
+title: "Informe técnico del Lago Cocibolca"
+author: "Felipe Mendoza Arriaza"
+date: "2025-10-16"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introducción
+
+Este informe presenta el análisis exploratorio y espacial de las variables físico-químicas del Lago Cocibolca. Se abordan aspectos descriptivos, correlacionales y espaciales mediante el cálculo de indicadores LISA (Local Moran’s I).
+
+## Carga de paquetes y base de datos
+
+packages \<- c("sf", "spdep", "spatialreg", "vioplot", "corrplot", "ggplot2", "readxl")
+
+no_i \<- packages[!packages %in% installed.packages()[, "Package"]]
+
+if (length(no_i) \> 0) install.packages(no_i, repos = "<https://cran.rstudio.com/>", dep = TRUE)
+
+lapply(packages, library, character.only = TRUE)
+
+dm \<- read_excel("C:/Users/DELL/Documents/2025/Curso R/Datos_Cocibolca_2.xlsx") head(dm) summary(dm)
+
+## Análisis descriptivo
+
+par(mfrow = c(1, 2), mar = c(4, 4, 2, 1))
+
+hist(dm$pH, main = "Histograma de pH", xlab = "pH", col = "lightblue", breaks = 10)
+hist(dm$Temperatura, main = "Histograma de Temperatura", xlab = "Temperatura (°C)", col = "salmon", breaks = 10)
+
+par(mfrow = c(1,1))
+
+
+## Diagramas de violín
+
+cols <- c("Redox", "OD", "Sat. O2")
+par(mfrow = c(1, length(cols)), mar = c(4,4,2,1))
+
+for (col in cols) {
+vioplot(dm[[col]], main = col, col = "lightblue", horizontal = TRUE)
+}
+par(mfrow = c(1,1))
+
+## Correlación entre variables
+
+cols <- c("Redox", "OD", "Sat. O2")
+cor_mat <- cor(dm[, cols], use = "complete.obs")
+cor_mat
+
+corrplot(cor_mat, method = "circle", type = "upper",
+col = colorRampPalette(c("orangered", "white", "mediumseagreen"))(200),
+tl.col = "darkslateblue", tl.srt = 45,
+addCoef.col = "midnightblue", number.cex = 0.8)
+
+## Mapa de temperatura
+
+dm_sf <- st_as_sf(dm, coords = c("Este_UTM", "Norte_UTM"), crs = 32616)
+dm_sf <- st_transform(dm_sf, crs = 4326)
+dm <- cbind(dm, st_coordinates(dm_sf))
+colnames(dm)[(ncol(dm)-1):ncol(dm)] <- c("lon", "lat")
+
+xlim <- range(dm$lon) + c(-0.05, 0.05)
+ylim <- range(dm$lat) + c(-0.05, 0.05)
+dm <- dm[, !duplicated(names(dm))]
+
+ggplot(dm) +
+annotation_borders("world", xlim = xlim, ylim = ylim, fill = "gray90", colour = "gray70") +
+geom_point(aes(x = lon, y = lat, colour = Temperatura), size = 2) +
+scale_color_gradient(low = "lightblue", high = "darkred") +
+coord_sf(xlim = xlim, ylim = ylim, expand = FALSE) +
+labs(title = "Mapa de Temperatura", x = "Longitud", y = "Latitud", colour = "Temp (°C)") +
+theme_minimal()
+
+## Cuartiles de pH y temperatura
+
+quantile(dm$Temperatura, probs = seq(0, 1, 0.25))
+quantile(dm$pH, probs = seq(0, 1, 0.25))
+aggregate(Temperatura ~ cut_number(pH, 4), data = dm, FUN = summary)
+
+## Mapas temáticos adicionales
+
+ggplot(dm, aes(x = lon, y = lat)) +
+annotation_borders("world", fill = "gray90", colour = "gray70") +
+geom_point(aes(size = OD, color = `Sat. O2`), alpha = 0.6) +
+scale_color_viridis_c() +
+coord_sf(xlim = range(dm$lon), ylim = range(dm$lat)) +
+theme_minimal() +
+labs(size = "OD", color = "Sat. O2")
+
+## Distribución por cuartiles de Redox
+
+vb <- dm$Redox
+q <- quantile(vb, probs = c(0.25, 0.5, 0.75), na.rm = TRUE)
+iqr <- IQR(vb, na.rm = TRUE)
+lw <- q[1] - 1.5 * iqr
+up <- q[3] + 1.5 * iqr
+
+dm$boxcat <- cut(vb,
+breaks = c(-Inf, lw, q[1], q[2], q[3], up, Inf),
+labels = c("Extremo bajo", "Q1", "Q2", "Q3", "Q4", "Extremo alto"),
+include.lowest = TRUE)
+
+ggplot(dm, aes(x = lon, y = lat)) +
+annotation_borders("world", xlim = xlim, ylim = ylim, fill = "gray90", colour = "gray70") +
+geom_point(aes(color = boxcat), size = 3) +
+scale_color_manual(values = c(
+"Extremo bajo" = "blue",
+"Q1"           = "lightblue",
+"Q2"           = "green",
+"Q3"           = "orange",
+"Q4"           = "red",
+"Extremo alto" = "darkred"
+)) +
+coord_sf(xlim = xlim, ylim = ylim, expand = FALSE) +
+theme_minimal() +
+labs(title = "Distribución espacial de Redox por cuartiles", x = "Longitud", y = "Latitud", color = "Categoría")
+
+## Vecinos espaciales y análisis LISA
+
+coords <- cbind(as.numeric(dm$lon), as.numeric(dm$lat))
+nb_knn <- knn2nb(knearneigh(coords, k = 4))
+W <- nb2listw(nb_knn, style = "W")
+
+dm <- dm[!is.na(dm$Redox), ]
+lisa <- localmoran(dm$Redox, W)
+
+dm$lisa_cat <- NA
+ref_val <- mean(dm$Redox, na.rm = TRUE)
+
+for (i in 1:nrow(dm)) {
+if (dm$Redox[i] >= ref_val & lisa[i,1] > 0) {
+dm$lisa_cat[i] <- "High-High"
+} else if (dm$Redox[i] < ref_val & lisa[i,1] > 0) {
+dm$lisa_cat[i] <- "Low-Low"
+} else if (dm$Redox[i] >= ref_val & lisa[i,1] < 0) {
+dm$lisa_cat[i] <- "High-Low"
+} else if (dm$Redox[i] < ref_val & lisa[i,1] < 0) {
+dm$lisa_cat[i] <- "Low-High"
+}
+}
+
+dm$lisa_cat <- factor(dm$lisa_cat, levels = c("High-High", "Low-Low", "High-Low", "Low-High"))
+
+ggplot(dm, aes(x = lon, y = lat)) +
+annotation_borders("world", xlim = xlim, ylim = ylim, fill = "gray90", colour = "gray70") +
+geom_point(aes(color = lisa_cat), size = 3) +
+scale_color_manual(values = c(
+"High-High" = "darkred",
+"Low-Low"   = "darkblue",
+"High-Low"  = "orange",
+"Low-High"  = "skyblue"
+)) +
+coord_sf(xlim = xlim, ylim = ylim, expand = FALSE) +
+theme_minimal() +
+labs(title = "Mapa de outliers espaciales LISA (Redox)",
+x = "Longitud", y = "Latitud",
+color = "Categoría LISA")
+
+## Tabla resumen de categorías LISA
+
+table(dm$lisa_cat)
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
